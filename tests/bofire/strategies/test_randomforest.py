@@ -125,5 +125,20 @@ def test_predict():
     print(p)
 
 
+def test_random():
+    test_domain = domains[0]
+    rf_strat = RandomForest(domain=test_domain)
+    random_samples = rf_strat.make_random_candidates(12)
+    print(random_samples)
+
+
+def test_ask_1234():
+    test_domain = domains[0]
+    test_domain.experiments = data[0]
+    rf_strat = RandomForest(domain=test_domain)
+    random_samples = rf_strat.ask(12)
+    print(random_samples)
+
+
 if __name__ == "__main__":
-    test_predict()
+    test_random()
