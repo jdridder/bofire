@@ -407,6 +407,7 @@ class PredictiveStrategy(Strategy):
             experiments=experiments, specs=self.input_preprocessing_specs
         )
         preds, stds = self._predict(transformed)
+
         if stds is not None:
             predictions = pd.DataFrame(
                 data=np.hstack((preds, stds)),
@@ -415,8 +416,8 @@ class PredictiveStrategy(Strategy):
                     for feat in self.domain.outputs.get_by_objective(Objective)
                 ]
                 + [
-                    "%s_sd" % featkey
-                    for featkey in self.domain.outputs.get_by_objective(Objective)
+                    "%s_sd" % feat.key
+                    for feat in self.domain.outputs.get_by_objective(Objective)
                 ],
             )
         else:
