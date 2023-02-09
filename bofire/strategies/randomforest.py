@@ -116,7 +116,7 @@ class RandomForest(PredictiveStrategy):
             axis=0, skipna=True
         ) - self.experiments[output_keys].min(axis=0, skipna=True)
 
-        return [np.abs(min_dist / yrange) for yrange in yranges]
+        return [np.abs(min_dist * yrange) for yrange in yranges]
 
     def _predict(self, experiments: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """Run predictions for the provided experiments. Only input features have to be provided.
@@ -250,29 +250,6 @@ class RandomForest(PredictiveStrategy):
     #         proposals.append(X.iloc[[best]])
 
     #     return pd.concat(proposals)
-
-    # def get_model_parameters(self) -> pd.DataFrame:
-    #     # get the columns labels for the one-hot encoded inputs in case there are categoricals
-    #     cols = self.problem.inputs.transform(
-    #         self.problem.data, categorical="dummy-encode"
-    #     ).columns
-
-    #     # return the feature importances
-    #     m = self.problem.n_outputs
-    #     params = pd.DataFrame(
-    #         index=self.problem.outputs.names,
-    #         data=np.tile(self.model.feature_importances_, reps=(m, 1)),
-    #         columns=cols,
-    #     )
-    #     params.index.name = "output"
-    #     return params
-
-    # def to_config(self) -> dict:
-    #     return {
-    #         "method": "RandomForest",
-    #         "problem": self.problem.to_config(),
-    #         "parameters": {"n_samples": self.n_samples},
-    #     }
 
     @classmethod
     def is_constraint_implemented(cls, my_type: Type[Constraint]) -> bool:
