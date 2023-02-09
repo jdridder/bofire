@@ -1,5 +1,6 @@
 import warnings
 
+import numpy as np
 import pandas as pd
 
 from bofire.domain import Domain
@@ -135,28 +136,19 @@ def test_init():
     test_domain = domains[0]
     test_domain.experiments = data[0]
     rf_strategy = RandomForest(domain=test_domain)
+    assert rf_strategy.models is not None
     assert len(rf_strategy.models[0].feature_importances_) == 5
 
 
 def test_predict():
     test_domain = domains[0]
     test_domain.experiments = data[0]
-
     rf_strategy = RandomForest(domain=test_domain)
-
-    # predict the training data... uncertainty should be zero
     p = rf_strategy.predict(test_domain.experiments)
-    print("predictions (training data):")
-    print(p)
-    print(p.iloc[:, 0])
-    print(p.iloc[:, 1].values)
-
-    # predict modified data
-    p = rf_strategy.predict(data[2])
-    print("predictions (modified data):")
-    print(p)
-    print(p.iloc[:, 0])
-    print(p.iloc[:, 1].values)
+    # one prediction for each observation
+    assert p.shape[0] == test_domain.experiments.shape[0]
+    # all predictions and uncertainties are finite numbers
+    assert np.all([np.isfinite(predval) for predval in p.values])
 
 
 def test_random():
@@ -166,12 +158,12 @@ def test_random():
     assert random_samples.shape[0] == 12
 
 
-def test_ask_1234():
+def test_ask():
     test_domain = domains[1]
     test_domain.experiments = data[1]
     rf_strat = RandomForest(domain=test_domain)
-    proposals = rf_strat.ask(12)
-    assert proposals.shape[0] == 12
+    proposals = rf_strat.ask(3)
+    assert proposals.shape[0] == 3
 
 
 if __name__ == "__main__":

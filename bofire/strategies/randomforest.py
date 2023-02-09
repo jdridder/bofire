@@ -1,17 +1,19 @@
-from typing import List, Optional, Sequence, Tuple, Type
+from typing import List, Optional, Sequence, Tuple, Type, Union
 
 import numpy as np
 import pandas as pd
 import torch
+from botorch.utils.sampling import sample_simplex
 from pydantic.types import NonNegativeFloat, PositiveInt
 from sklearn.ensemble import RandomForestRegressor
 
 from bofire.domain.constraints import Constraint
-from bofire.domain.features import _CAT_SEP, CategoricalInput, Feature
+from bofire.domain.features import _CAT_SEP, AnyInputFeature, CategoricalInput, Feature
 from bofire.domain.objectives import Objective
 from bofire.strategies.random import RandomStrategy
 from bofire.strategies.strategy import PredictiveStrategy
 from bofire.utils.enum import CategoricalEncodingEnum
+from bofire.utils.multiobjective import get_pareto_front
 
 
 class RandomForest(PredictiveStrategy):
@@ -27,7 +29,7 @@ class RandomForest(PredictiveStrategy):
     - Pareto approximation: Not implemented.
     """
 
-    models: Optional[Sequence[RandomForestRegressor]]
+    models: Optional[Sequence[RandomForestRegressor]] = None
 
     def _fit(self, experiments: pd.DataFrame) -> None:
 
@@ -39,7 +41,7 @@ class RandomForest(PredictiveStrategy):
         self.models = []
         for y_name in self.domain.outputs.get_keys():
             y = experiments[y_name].to_numpy()
-            self.models.append(RandomForestRegressor().fit(Xt, y))
+            self.models.append(RandomForestRegressor().fit(Xt.values, y))
 
         self.is_fitted = True
         return None
@@ -77,10 +79,16 @@ class RandomForest(PredictiveStrategy):
                         X1[cat_colname] /= 2
                         X2[cat_colname] /= 2
 
-        D = torch.cdist(torch.tensor(X1.values), torch.tensor(X2.values), p=p).numpy()
+        D = torch.cdist(
+            torch.tensor(X1.values.astype("float")),
+            torch.tensor(X2.values.astype("float")),
+            p=p,
+        ).numpy()
         return D.min(axis=1)
 
-    def _uncertainty(self, Xquery: pd.DataFrame) -> List[np.ndarray]:
+    def _uncertainty(
+        self, Xquery: pd.DataFrame, Xtrain: Optional[pd.DataFrame] = None
+    ) -> List[np.ndarray]:
         """Uncertainty estimate ~ distance to the closest data point.
 
         Each element in the returned list is a vector of length
@@ -88,23 +96,32 @@ class RandomForest(PredictiveStrategy):
         distance to the nearest datapoint in the training data in self.experiments.
         The length of the returned list is the same as the number of output features
         for prediction and the scaling factor is the range of the output feature values.
+        If the user passes Xtrain, this is used as the training data from which the
+        distance determines the uncertainty - this is handy for accounting for pending
+        experiments. Otherwise the self.experiments is used.
 
         Args:
             Xquery (pd.DataFrame): set of points for which the uncertainties are required
+            Xtrain (Optional[pd.DataFrame]): reference points; if a point in Xquery is close to
+                any point in Xtrain then it will have low uncertainty. If a point in Xquery is
+                far from all points in Xtrain, it will have high uncertainty.
 
         Returns:
             List[np.ndarray]
         """
-
-        if self.domain.experiments is not None:
-            Xtrain = self.domain.inputs.transform(
-                experiments=self.domain.experiments,
-                specs=self.input_preprocessing_specs,
-            )
+        if Xtrain is not None:
+            experiments = Xtrain
+        elif self.domain.experiments is not None:
+            experiments = self.domain.experiments
         else:
             raise Exception(
                 "No training data were found for uncertainty estimation in RandomForest._uncertainty"
             )
+
+        Xtrain = self.domain.inputs.transform(
+            experiments=experiments,
+            specs=self.input_preprocessing_specs,
+        )
 
         min_dist = self._min_distance(Xquery, Xtrain)
         min_dist = min_dist / len(Xtrain.columns)
@@ -144,7 +161,7 @@ class RandomForest(PredictiveStrategy):
         self,
         candidates: pd.DataFrame,
         kappa: NonNegativeFloat,
-        predictions: Optional[pd.DataFrame],
+        predictions: Optional[pd.DataFrame] = None,
     ) -> pd.DataFrame:
         """Calculate the acqusition value for a set of experiments.
 
@@ -172,37 +189,115 @@ class RandomForest(PredictiveStrategy):
         candidate_count: Optional[PositiveInt] = None,
         sample_count: PositiveInt = 10000,
         kappa: NonNegativeFloat = 0.5,
-    ) -> pd.DataFrame:
+        weights: Optional[np.ndarray] = None,
+    ) -> Union[pd.DataFrame, None]:
         """Draw many random samples and return the best candidate_count ones
+
+        Do the following candidate_count times:
+        1)  sample a weight vector from the simplex with #objectives dimensions
+        2)  get a lot (sample_count) of random samples covering the input space
+        3)  calculate the acq fun for each random sample
+        4)  scale the acq function values to makes multiple objectives comparable (Pareto front in unit hypercube)
+        5)  chebyshev scalarization
+        6)  choose the best candidate
 
         Args:
             candidate_count (PositiveInt, optional): Number of candidates to be generated. Defaults to None.
-            sample_count (PositiveInt, optional): Number of random samples from which candidate_count should be selected.
-                Larger values will lead to better optima but will be slower and use more memory.
+            sample_count (PositiveInt, optional): Number of random samples used to cover the space and then filter
+                for the optimization. Larger values will lead to better optima but will be slower and use more memory.
             kappa (NonNegativeFloat)): Parameter controlling the exploration/exploitation trade-off. Larger values
                 favor uncertainty; setting kappa to zero causes the prediction uncertainty to be ignored.
+            weights (Optional[np.ndarray]): Objective weights, which should sum up to one for each proposal. Each
+                row corresponds to a proposal and each column corresponds to an objective.
 
         Returns:
             pd.DataFrame: DataFrame with candidates (proposed experiments).
         """
-        random_samples = self.make_random_candidates(sample_count)
-        samples_predicted = self.predict(random_samples)
-        acqf_values = self.calc_acquisition(
-            candidates=random_samples, kappa=kappa, predictions=samples_predicted
+        if weights is not None:
+            if candidate_count is not None:
+                if weights.shape[0] != candidate_count:
+                    raise Exception(
+                        f"Asked for {candidate_count} proposals but supplied {weights.shape[0]} objective weights in RandomForest._ask (those two numbers should be the same)."
+                    )
+            if weights.shape[1] != len(self.domain.output_features):
+                raise Exception(
+                    f"Provided {weights.shape[1]} weights but the domain has {len(self.domain.output_features)} objectives in RandomForest._ask (those two numbers should be the same)."
+                )
+            if np.all([np.isclose(wsum, 1.0) for wsum in weights.sum(axis=1)]):
+                raise Exception(
+                    "Each row of the weight array supplied to RandomForest._ask should sum to one."
+                )
+        else:
+            if candidate_count is not None:
+                weights = sample_simplex(
+                    d=len(self.domain.output_features), n=candidate_count
+                ).numpy()
+
+        if weights is None:
+            return None
+
+        proposals = []
+        for weight_vec in weights:
+            rand_samples_inputs = self.make_random_candidates(sample_count)
+            rand_samples_predictions = self.predict(rand_samples_inputs)
+
+            # take pending proposals into account for subsequent uncertainty calculations
+            Xtrain = pd.concat(
+                [self.experiments[self.domain.get_feature_keys(AnyInputFeature)]]
+                + proposals,
+                axis=0,
+            )
+            rand_samples_inputs_preproc = self.domain.inputs.transform(
+                experiments=rand_samples_inputs, specs=self.input_preprocessing_specs
+            )
+            prediction_uncertainty = self._uncertainty(
+                rand_samples_inputs_preproc, Xtrain
+            )
+            # Replace the raw predicted uncertainties with those influenced by the liar/fantasy proposals
+            for i, feat in enumerate(self.domain.outputs.get_by_objective(Objective)):
+                rand_samples_predictions[f"{feat.key}_sd"] = prediction_uncertainty[i]
+
+            # acquisition function for the random samples
+            acqf_values = self.calc_acquisition(
+                candidates=rand_samples_inputs,
+                kappa=kappa,
+                predictions=rand_samples_predictions,
+            )
+
+            # combine inputs, predictions and acqf values
+            candidates = pd.concat(
+                [rand_samples_inputs, rand_samples_predictions], axis=1
+            )
+            map_pred_to_raw = {
+                f"{feat.key}_pred": f"{feat.key}"
+                for feat in self.domain.outputs.get_by_objective(Objective)
+            }
+            candidates.rename(columns=map_pred_to_raw, inplace=True)
+
+            # Scale the acquisition function values such that those corresponding to the non-dominated
+            # candidate points are in the unit range. Add the valid_ columns for get_pareto_front
+            for feat in self.domain.outputs.get_by_objective(Objective):
+                candidates[f"valid_{feat.key}"] = True
+            pfront = get_pareto_front(
+                self.domain, pd.concat([candidates, acqf_values], axis=1)
+            )
+            acqf_max = pfront[acqf_values.columns].max(axis=0)
+            acqf_min = pfront[acqf_values.columns].min(axis=0)
+            acqf_values = (acqf_values - acqf_min) / (acqf_max - acqf_min)
+
+            # Chebyshev scalarization
+            A = np.max(weight_vec * acqf_values, axis=1)
+            best = np.argmin(A)
+            proposals.append(rand_samples_inputs.iloc[best])
+
+        # list -> DataFrame and augment with predictions and uncertainties
+        proposals_inputs = pd.concat(proposals, axis=1).T.reset_index(drop=True)
+        proposals_preds = self.predict(proposals_inputs)
+        proposals_acqf = self.calc_acquisition(
+            candidates=proposals_inputs, kappa=kappa, predictions=proposals_preds
         )
-        proposals = pd.concat([random_samples, samples_predicted, acqf_values], axis=1)
 
-        # bofire.utils.multiobjective.get_pareto_front should help us out here
-
-        # Do the following Nproposals times:
-        #     sample a weight vector from the simplex with Nobjs dimensions
-        #     get a lot of random samples covering the input space
-        #     calculate the acq fun for each random sample
-        #     scale the acq function values to makes multiple objectives comparable (Pareto front in unit hypercube)
-        #     chebyshev scalarization
-        #     choose the best candidate
-
-        return proposals.iloc[:candidate_count, :]
+        return pd.concat([proposals_inputs, proposals_preds, proposals_acqf], axis=1)
 
     # def _ask(
     #     self,
