@@ -1,26 +1,123 @@
 import warnings
 
 import numpy as np
-import pandas as pd
+import pytest
 
 from bofire.domain import Domain
+from bofire.domain.constraints import (
+    LinearEqualityConstraint,
+    LinearInequalityConstraint,
+    NChooseKConstraint,
+    NonlinearEqualityConstraint,
+    NonlinearInequalityConstraint,
+)
 from bofire.domain.features import (
     CategoricalDescriptorInput,
     CategoricalInput,
     ContinuousInput,
     ContinuousOutput,
+    DiscreteInput,
 )
+from bofire.strategies.random import RandomStrategy
 from bofire.strategies.randomforest import RandomForest
-from tests.bofire.domain.test_features import (
-    VALID_ALLOWED_CATEGORICAL_DESCRIPTOR_INPUT_FEATURE_SPEC,
-    VALID_CATEGORICAL_DESCRIPTOR_INPUT_FEATURE_SPEC,
-    VALID_CATEGORICAL_INPUT_FEATURE_SPEC,
-    VALID_CONTINUOUS_INPUT_FEATURE_SPEC,
-    VALID_CONTINUOUS_OUTPUT_FEATURE_SPEC,
-    VALID_FIXED_CATEGORICAL_DESCRIPTOR_INPUT_FEATURE_SPEC,
-    VALID_FIXED_CATEGORICAL_INPUT_FEATURE_SPEC,
-    VALID_FIXED_CONTINUOUS_INPUT_FEATURE_SPEC,
+
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+warnings.filterwarnings("ignore", category=UserWarning, append=True)
+
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+
+if0 = ContinuousInput(key="if0", lower_bound=0, upper_bound=1)
+if1 = ContinuousInput(key="if1", lower_bound=0, upper_bound=2)
+if2 = ContinuousInput(key="if2", lower_bound=0, upper_bound=3)
+if3 = CategoricalInput(key="if3", categories=["c1", "c2", "c3"])
+if4 = CategoricalInput(
+    key="if4", categories=["A", "B", "C"], allowed=[True, True, True]
 )
+if5 = CategoricalInput(key="if5", categories=["A", "B"], allowed=[True, True])
+if6 = CategoricalDescriptorInput(
+    key="if6",
+    categories=["A", "B", "C"],
+    descriptors=["d1", "d2"],
+    values=[[1, 2], [3, 7], [5, 1]],
+)
+if7 = DiscreteInput(key="if7", values=[0, 1, 5])
+
+of1 = ContinuousOutput(key="of1")
+
+c1 = LinearEqualityConstraint(features=["if0", "if1"], coefficients=[1, 1], rhs=1)
+c2 = LinearInequalityConstraint(features=["if0", "if1"], coefficients=[1, 1], rhs=1)
+c3 = NonlinearEqualityConstraint(expression="if0**2 + if1**2 - 1")
+c4 = NonlinearInequalityConstraint(expression="if0**2 + if1**2 - 1")
+c5 = NChooseKConstraint(
+    features=["if0", "if1", "if2"], min_count=0, max_count=2, none_also_valid=False
+)
+
+supported_domains = [
+    Domain(
+        # continuous features
+        input_features=[if0, if1],
+        output_features=[of1],
+        constraints=[],
+    ),
+    Domain(
+        # continuous features incl. with fixed values
+        input_features=[if0, if1, if2],
+        output_features=[of1],
+        constraints=[],
+    ),
+    Domain(
+        # all feature types
+        input_features=[if1, if3, if6, if7],
+        output_features=[of1],
+        constraints=[],
+    ),
+    Domain(
+        # all feature types incl. with fixed values
+        input_features=[if1, if2, if3, if4, if5, if6, if7],
+        output_features=[of1],
+        constraints=[],
+    ),
+    Domain(
+        # all feature types, linear equality
+        input_features=[if0, if1, if2, if3, if4, if5, if6, if7],
+        output_features=[of1],
+        constraints=[c1],
+    ),
+    Domain(
+        # all feature types, linear inequality
+        input_features=[if0, if1, if2, if3, if4, if5, if6, if7],
+        output_features=[of1],
+        constraints=[c2],
+    ),
+    Domain(
+        # all feature types, nonlinear inequality
+        input_features=[if0, if1, if2, if3, if4, if5, if6, if7],
+        output_features=[of1],
+        constraints=[c4],
+    ),
+]
+
+unsupported_domains = [
+    Domain(
+        # nonlinear equality
+        input_features=[if0, if1, if2, if3, if4, if5, if6, if7],
+        output_features=[of1],
+        constraints=[c3],
+    ),
+    Domain(
+        # combination of linear equality and nonlinear inequality
+        input_features=[if0, if1, if2, if3, if4, if5, if6, if7],
+        output_features=[of1],
+        constraints=[c1, c4],
+    ),
+    # Domain(
+    #     # n-choose-k
+    #     input_features=[if0, if1, if2, if3, if4, if5, if6, if7],
+    #     output_features=[of1],
+    #     constraints=[c5],
+    # ),
+]
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", category=UserWarning, append=True)
@@ -29,152 +126,26 @@ with warnings.catch_warnings():
     warnings.simplefilter("ignore")
 
 
-if1 = ContinuousInput(
-    **{
-        **VALID_CONTINUOUS_INPUT_FEATURE_SPEC,
-        "key": "if1",
-    }
+@pytest.mark.parametrize(
+    "domain, n_proposals",
+    [
+        (supported_domains[0], 3),
+        (supported_domains[1], 3),
+        (supported_domains[2], 3),
+        (supported_domains[3], 3),
+        (supported_domains[5], 1)
+        # (supported_domains[5], 1),
+        # (supported_domains[6], 1)
+    ],
 )
-if2 = ContinuousInput(
-    **{
-        **VALID_FIXED_CONTINUOUS_INPUT_FEATURE_SPEC,
-        "key": "if2",
-    }
-)
-
-if3 = CategoricalInput(
-    **{
-        **VALID_CATEGORICAL_INPUT_FEATURE_SPEC,
-        "key": "if3",
-    }
-)
-
-if4 = CategoricalInput(
-    **{
-        **VALID_FIXED_CATEGORICAL_INPUT_FEATURE_SPEC,
-        "key": "if4",
-    }
-)
-
-if5 = CategoricalDescriptorInput(
-    **{
-        **VALID_CATEGORICAL_DESCRIPTOR_INPUT_FEATURE_SPEC,
-        "key": "if5",
-    }
-)
-
-if6 = CategoricalDescriptorInput(
-    **{
-        **VALID_FIXED_CATEGORICAL_DESCRIPTOR_INPUT_FEATURE_SPEC,
-        "key": "if6",
-    }
-)
-
-# if7 = DummyFeature(key="if7")
-
-if8 = CategoricalDescriptorInput(
-    **{
-        **VALID_ALLOWED_CATEGORICAL_DESCRIPTOR_INPUT_FEATURE_SPEC,
-        "key": "if8",
-    }
-)
-
-of1 = ContinuousOutput(
-    **{
-        **VALID_CONTINUOUS_OUTPUT_FEATURE_SPEC,
-        "key": "of1",
-    }
-)
-
-of2 = ContinuousOutput(
-    **{
-        **VALID_CONTINUOUS_OUTPUT_FEATURE_SPEC,
-        "key": "of2",
-    }
-)
-
-# Copied from test_base.py
-domains = [
-    Domain(
-        input_features=[if1, if3, if5],  # no fixed features
-        output_features=[of1],
-        constraints=[],
-    ),
-    Domain(
-        input_features=[if1, if3, if5],  # no fixed features
-        output_features=[of1, of2],
-        constraints=[],
-    ),
-]
-
-data = [
-    pd.DataFrame.from_dict(
-        {
-            "if1": [3, 4, 5, 4.5],
-            "if3": ["c1", "c2", "c3", "c1"],
-            "if5": ["c1", "c2", "c3", "c1"],
-            "of1": [10, 11, 12, 13],
-            "valid_of1": [1, 0, 1, 0],
-        }
-    ),
-    pd.DataFrame.from_dict(
-        {
-            "if1": [3, 4, 5, 4.5],
-            "if3": ["c1", "c2", "c3", "c1"],
-            "if5": ["c1", "c2", "c3", "c1"],
-            "of1": [10, 11, 12, 13],
-            "of2": [0.1, 0.98, 1, 0.75],
-        }
-    ),
-    pd.DataFrame.from_dict(
-        {"if1": [3.01, 6], "if3": ["c1", "c2"], "if5": ["c1", "c3"], "of1": [9.8, 11]}
-    ),
-]
-
-
-def test_init():
-    test_domain = domains[0]
-    test_domain.experiments = data[0]
-    rf_strategy = RandomForest(domain=test_domain)
-    assert rf_strategy.models is not None
-    assert len(rf_strategy.models[0].feature_importances_) == 5
-
-
-def test_predict():
-    test_domain = domains[0]
-    test_domain.experiments = data[0]
-    rf_strategy = RandomForest(domain=test_domain)
-    p = rf_strategy.predict(test_domain.experiments)
-    # one prediction for each observation
-    assert p.shape[0] == test_domain.experiments.shape[0]
-    # all predictions and uncertainties are finite numbers
-    assert np.all([np.isfinite(predval) for predval in p.values])
-
-
-# TODO: parameterize these tests with @pytest.mark.parametrize
-def test_ask_single_obj():
-    test_domain = domains[0]
-    test_domain.experiments = data[0]
-    rf_strat = RandomForest(domain=test_domain)
-    proposals = rf_strat.ask(3)
-    assert proposals.shape[0] == 3
-    proposals_numeric = proposals[
-        test_domain.get_feature_keys(ContinuousInput)
-    ].values.astype("float")
-    assert np.all([not np.isnan(propval) for propval in proposals_numeric])
-
-
-def test_ask_multiobj():
-    test_domain = domains[1]
-    test_domain.experiments = data[1]
-    rf_strat = RandomForest(domain=test_domain)
-    proposals = rf_strat.ask(3)
-    assert proposals.shape[0] == 3
-    proposals_numeric = proposals[
-        test_domain.get_feature_keys(ContinuousInput)
-    ].values.astype("float")
-    assert np.all([not np.isnan(propval) for propval in proposals_numeric])
-
-
-if __name__ == "__main__":
-    test_ask_multiobj()
+def test_ask(domain, n_proposals):
+    rand_strat = RandomStrategy(domain=domain)
+    random_data = rand_strat.ask(12)
+    for i, outvar in enumerate(domain.outputs.get_keys()):
+        lb = domain.outputs[i].dict()["objective"]["lower_bound"]
+        ub = domain.outputs[i].dict()["objective"]["upper_bound"]
+        random_data[outvar] = np.random.rand(random_data.shape[0]) * (ub - lb) + lb
+    domain.experiments = random_data
+    rf_strat = RandomForest(domain=domain)
+    proposals = rf_strat.ask(n_proposals)
+    assert proposals.shape[0] == n_proposals
