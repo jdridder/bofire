@@ -151,20 +151,30 @@ def test_predict():
     assert np.all([np.isfinite(predval) for predval in p.values])
 
 
-def test_random():
+# TODO: parameterize these tests with @pytest.mark.parametrize
+def test_ask_single_obj():
     test_domain = domains[0]
+    test_domain.experiments = data[0]
     rf_strat = RandomForest(domain=test_domain)
-    random_samples = rf_strat.make_random_candidates(12)
-    assert random_samples.shape[0] == 12
+    proposals = rf_strat.ask(3)
+    assert proposals.shape[0] == 3
+    proposals_numeric = proposals[
+        test_domain.get_feature_keys(ContinuousInput)
+    ].values.astype("float")
+    assert np.all([not np.isnan(propval) for propval in proposals_numeric])
 
 
-def test_ask():
+def test_ask_multiobj():
     test_domain = domains[1]
     test_domain.experiments = data[1]
     rf_strat = RandomForest(domain=test_domain)
     proposals = rf_strat.ask(3)
     assert proposals.shape[0] == 3
+    proposals_numeric = proposals[
+        test_domain.get_feature_keys(ContinuousInput)
+    ].values.astype("float")
+    assert np.all([not np.isnan(propval) for propval in proposals_numeric])
 
 
 if __name__ == "__main__":
-    test_random()
+    test_ask_multiobj()

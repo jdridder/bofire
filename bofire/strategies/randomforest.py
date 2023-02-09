@@ -278,9 +278,12 @@ class RandomForest(PredictiveStrategy):
             # candidate points are in the unit range. Add the valid_ columns for get_pareto_front
             for feat in self.domain.outputs.get_by_objective(Objective):
                 candidates[f"valid_{feat.key}"] = True
-            pfront = get_pareto_front(
-                self.domain, pd.concat([candidates, acqf_values], axis=1)
-            )
+            if len(self.domain.outputs.get_by_objective(Objective)) > 1:
+                pfront = get_pareto_front(
+                    self.domain, pd.concat([candidates, acqf_values], axis=1)
+                )
+            else:
+                pfront = pd.concat([candidates, acqf_values], axis=1)
             acqf_max = pfront[acqf_values.columns].max(axis=0)
             acqf_min = pfront[acqf_values.columns].min(axis=0)
             acqf_values = (acqf_values - acqf_min) / (acqf_max - acqf_min)
