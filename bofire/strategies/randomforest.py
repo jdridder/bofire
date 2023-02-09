@@ -1,5 +1,6 @@
-from typing import Optional, Sequence, Tuple, Type
+from typing import List, Optional, Sequence, Tuple, Type
 
+import numpy as np
 import pandas as pd
 import torch
 from pydantic.types import NonNegativeFloat, PositiveInt
@@ -46,10 +47,27 @@ class RandomForest(PredictiveStrategy):
     def make_random_candidates(self, Ncands: PositiveInt) -> pd.DataFrame:
         return RandomStrategy(domain=self.domain).ask(Ncands)
 
-    def _min_distance(self, X1: pd.DataFrame, X2: pd.DataFrame):
-        """Matrix of L1-norm-distances between each point in X1 and X2"""
+    def _min_distance(
+        self, X1: pd.DataFrame, X2: pd.DataFrame, p: NonNegativeFloat = 1.0
+    ) -> torch.Tensor:
+        """Vector of minimum L1-norm-distances between each point in X1 and all in X2
+
+        Args:
+            X1 (pd.DataFrame): Set of points for which min distances to X2 are required
+            X2 (pd.DataFrame): Set of reference or training points. X1 and X2 should
+                have the same column names.
+            p (NonNegativeFloat): p value for the p-norm distance to calculate between
+                each vector pair. The default of 1 corresponds to the L-1 norm.
+
+        Returns:
+            torch.Tensor of length X1.shape[0], ie, number of rows in X1. Each entry is
+                the minimum distance between the corresponding row in X1 and all the rows
+                of X2.
+        """
 
         # set all onehot-encode values to 0.5 so that the L1-distance becomes 1
+        # since we are working with the transformed data we have to do a bit of
+        # work here to find out the names of the columns related to each feature
         if self.domain.get_feature_keys(CategoricalInput) is not None:
             for featname in self.domain.get_feature_keys(CategoricalInput):
                 feat = self.domain.get_feature(featname)
@@ -59,16 +77,46 @@ class RandomForest(PredictiveStrategy):
                         X1[cat_colname] /= 2
                         X2[cat_colname] /= 2
 
-        D = torch.cdist(torch.tensor(X1.values), torch.tensor(X2.values)).numpy()
+        D = torch.cdist(torch.tensor(X1.values), torch.tensor(X2.values), p=p).numpy()
         return D.min(axis=1)
 
-    # def _uncertainty(self, X: pd.DataFrame, X_data: Optional[pd.DataFrame] = None):
-    #     """Uncertainty estimate ~ distance to the closest data point."""
-    #     if X_data is None:
-    #         X_data = self.problem.data
-    #     min_dist = self._min_distance(X, X_data)
-    #     min_dist = min_dist / self.problem.n_inputs
-    #     return self.y_range * min_dist[:, np.newaxis]
+    def _uncertainty(self, Xquery: pd.DataFrame) -> List[np.ndarray]:
+        """Uncertainty estimate ~ distance to the closest data point.
+
+        Each element in the returned list is a vector of length
+        Xquery.shape[0] (ie, number of rows in Xquery) giving the scaled minimum
+        distance to the nearest datapoint in the training data in self.experiments.
+        The length of the returned list is the same as the number of output features
+        for prediction and the scaling factor is the range of the output feature values.
+
+        Args:
+            Xquery (pd.DataFrame): set of points for which the uncertainties are required
+
+        Returns:
+            List[np.ndarray]
+        """
+
+        if self.domain.experiments is not None:
+            Xtrain = self.domain.inputs.transform(
+                experiments=self.domain.experiments,
+                specs=self.input_preprocessing_specs,
+            )
+        else:
+            raise Exception(
+                "No training data were found for uncertainty estimation in RandomForest._uncertainty"
+            )
+
+        min_dist = self._min_distance(Xquery, Xtrain)
+        min_dist = min_dist / len(Xtrain.columns)
+
+        # divide by the range of observed target values to make the scale of the uncertainty
+        # better match the rest of the acquisition function
+        output_keys = self.domain.output_features.get_keys()
+        yranges = self.experiments[output_keys].max(
+            axis=0, skipna=True
+        ) - self.experiments[output_keys].min(axis=0, skipna=True)
+
+        return [np.abs(min_dist / yrange) for yrange in yranges]
 
     def _predict(self, experiments: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """Run predictions for the provided experiments. Only input features have to be provided.
@@ -85,33 +133,10 @@ class RandomForest(PredictiveStrategy):
             )
         Xt = experiments  # experiments has already been transformed / preprocessed
         Ym = [model.predict(Xt.to_numpy()) for model in self.models]
+        uncert = self._uncertainty(Xt)
 
-        if self.domain.experiments is not None:
-            Xtrain = self.domain.inputs.transform(
-                experiments=self.domain.experiments,
-                specs=self.input_preprocessing_specs,
-            )
-        else:
-            raise Exception(
-                "No training data were found for uncertainty estimation in RandomForest._predict"
-            )
-
-        # DEBUG
-        print("this is Xtrain in _predict:")
-        print(Xtrain)
-        print("...")
-
-        # Ys = self._uncertainty(X)
-        print("this is Xt in _predict:")
-        print(Xt)
-        print("...")
-
-        print("mindist:")
-        mindist = self._min_distance(Xt, Xtrain)
-        print(mindist)
-        # END DEBUG
         ypred = pd.DataFrame(Ym).T
-        yuncert = pd.DataFrame(Ym).T
+        yuncert = pd.DataFrame(uncert).T
 
         return ypred, yuncert
 
@@ -167,9 +192,15 @@ class RandomForest(PredictiveStrategy):
         )
         proposals = pd.concat([random_samples, samples_predicted, acqf_values], axis=1)
 
-        # scale the acq function values to makes multiple objectives comparable
-        # chebyshev scalarization
-        # choose the best candidates
+        # bofire.utils.multiobjective.get_pareto_front should help us out here
+
+        # Do the following Nproposals times:
+        #     sample a weight vector from the simplex with Nobjs dimensions
+        #     get a lot of random samples covering the input space
+        #     calculate the acq fun for each random sample
+        #     scale the acq function values to makes multiple objectives comparable (Pareto front in unit hypercube)
+        #     chebyshev scalarization
+        #     choose the best candidate
 
         return proposals.iloc[:candidate_count, :]
 
@@ -245,15 +276,10 @@ class RandomForest(PredictiveStrategy):
 
     @classmethod
     def is_constraint_implemented(cls, my_type: Type[Constraint]) -> bool:
-        """Method to check if a specific constraint type is implemented for the strategy
-
-        Args:
-            my_type (Type[Constraint]): Constraint class
-
-        Returns:
-            bool: True if the constraint type is valid for the strategy chosen, False otherwise
+        """The optimization is based on random sampling here, so whatever constraints
+        are ok for the random sampler are ok here too
         """
-        return True
+        return RandomStrategy.is_constraint_implemented(my_type)
 
     @classmethod
     def is_feature_implemented(cls, my_type: Type[Feature]) -> bool:
